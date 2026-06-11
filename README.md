@@ -4,17 +4,10 @@ Single-node wrapper for [Bernini](https://github.com/bytedance/Bernini) video ed
 
 Built-in Ollama/vLLM prompt enhancement using Bernini's official per-task templates with optional vision (sends your reference images to the LLM for accurate descriptions).
 
-**This is a personal tool shared as-is. Vibedcoded boucing ideas and code between Claude Opus 4.6max & Gemini 3.1pro.  No guarantees/support/maintenance commitment - Is what it is**
+**This is a personal tool shared as-is. Vibecoded bouncing ideas and code between Claude Opus 4.6max & Gemini 3.1pro. No guarantees/support/maintenance commitment – it is what it is.**
 
-![screenshot](screenshot.png)
-
-## Tasks
-
-![task modes](screenshot3.png)
-
-## Ollama dropdown (Shows all your Ollama models)
-
-![ollama models](screenshot2.png)
+![Bernini Studio node UI](./screenshots/screenshot1-3.jpg)
+![Workflow and UI example](./screenshots/screenshot2-2.jpg)
 
 ## Requirements
 
@@ -26,40 +19,8 @@ Clone into `ComfyUI/custom_nodes/`:
 
 ```
 cd ComfyUI/custom_nodes
-git clone https://github.com/YOURUSERNAME/ComfyUI-BerniniStudio.git
+git clone https://github.com/CCpt5/ComfyUI-BerniniStudio.git
 ```
-
-Folder layout matters:
-
-```
-ComfyUI/custom_nodes/ComfyUI-BerniniStudio/
-    __init__.py
-    bernini_studio.py
-    js/
-        bernini_studio.js    <-- inside js/ subfolder, not root
-```
-
-Restart ComfyUI. The node appears as **Bernini Studio** under `conditioning/video_models`.
-
-## Workflow
-
-```
-CLIPLoader (wan) -------- clip --+
-VAELoader (wan 2.2) ----- vae ---+
-VHS_LoadVideo -- source_video ---+
-LoadImage -------- image0 ------+
-                                 v
-                          BerniniStudio
-                           |-- positive --> SamplerCustom (HIGH model)
-                           |-- negative --> SamplerCustom (HIGH model)
-                           |-- latent ----> SamplerCustom (HIGH model)
-                                                |
-                                           SamplerCustom (LOW model)
-                                                |
-                                           VAEDecode --> output
-```
-
-Use `SplitSigmas` between HIGH and LOW samplers. Load both Bernini model files via `UNETLoader`.
 
 ## Reference images in prompts
 
