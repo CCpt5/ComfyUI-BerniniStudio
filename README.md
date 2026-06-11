@@ -6,8 +6,8 @@ Built-in Ollama/vLLM prompt enhancement using Bernini's official per-task templa
 
 **This is a personal tool shared as-is. Vibecoded bouncing ideas and code between Claude Opus 4.6max & Gemini 3.1pro. No guarantees/support/maintenance commitment – it is what it is.**
 
-![Bernini Studio node UI](./screenshots/screenshot1-3.jpg)
-![Workflow and UI example](./screenshots/screenshot2-2.jpg)
+![Bernini Studio node UI](./screenshots/screenshot1.jpg)
+![Workflow and UI example](./screenshots/screenshot.jpg)
 
 ## Requirements
 
