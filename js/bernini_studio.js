@@ -29,7 +29,7 @@ const C = {
 const HIDDEN_WIDGETS = [
     "task_type", "prompt", "negative_prompt",
     "ollama_url", "ollama_model", "use_default_neg",
-    "api_format", "auto_enhance", "unload_ollama", "slot_images",
+    "api_format", "auto_enhance", "unload_ollama", "slot_images", "send_ref_images",
     "augment_strength", "augment_decay", "augment_seed",
 ];
 
@@ -148,6 +148,7 @@ class BerniniEditor {
         this.apiFormatWidget = findWidget(node, "api_format");
         this.autoEnhanceWidget = findWidget(node, "auto_enhance");
         this.unloadOllamaWidget = findWidget(node, "unload_ollama");
+        this.sendRefImagesWidget = findWidget(node, "send_ref_images");
         this.slotImagesWidget = findWidget(node, "slot_images");
         this.augStrengthWidget = findWidget(node, "augment_strength");
         this.augDecayWidget = findWidget(node, "augment_decay");
@@ -200,10 +201,20 @@ class BerniniEditor {
             fontFamily: "monospace",
         }, "");
         badges.appendChild(this.guidanceBadge);
+        this.layoutBtn = el("button", {
+            background: "transparent", color: C.dim, border: "1px solid " + C.borderIn,
+            borderRadius: "3px", padding: "1px 7px", fontSize: "9px", cursor: "pointer",
+        }, "Layout");
+        this.layoutBtn.onclick = () => {
+            this._layoutMode = this._layoutMode === "split" ? "stacked" : "split";
+            try { localStorage.setItem("berniniStudioLayout", this._layoutMode); } catch (e) {}
+            this._applyLayout();
+        };
+        badges.appendChild(this.layoutBtn);
         badges.appendChild(el("span", {
             fontSize: "9px", color: C.muted, background: C.deep,
             padding: "2px 6px", borderRadius: "3px", border: "1px solid " + C.borderIn,
-        }, "v2.2"));
+        }, "v2.3"));
         header.appendChild(badges);
         this.root.appendChild(header);
 
@@ -594,6 +605,25 @@ class BerniniEditor {
         formatRow.appendChild(this.visionBadge);
         this.ollamaBody.appendChild(formatRow);
 
+        // Send-images toggle (vision vs text-only models)
+        const sendImgRow = el("div", { display: "flex", alignItems: "center", gap: "6px" });
+        this.sendImgCheck = document.createElement("input");
+        this.sendImgCheck.type = "checkbox";
+        this.sendImgCheck.checked = this.sendRefImagesWidget ? this.sendRefImagesWidget.value !== false : true;
+        this.sendImgCheck.style.cssText = "width:12px;height:12px;cursor:pointer;accent-color:" + C.accent;
+        this.sendImgCheck.onchange = () => {
+            if (this.sendRefImagesWidget) this.sendRefImagesWidget.value = this.sendImgCheck.checked;
+        };
+        sendImgRow.appendChild(this.sendImgCheck);
+        const sendImgLabel = el("span", { fontSize: "10px", color: C.muted, cursor: "pointer" },
+            "Send connected reference images (vision models)");
+        sendImgLabel.onclick = () => {
+            this.sendImgCheck.checked = !this.sendImgCheck.checked;
+            this.sendImgCheck.dispatchEvent(new Event("change"));
+        };
+        sendImgRow.appendChild(sendImgLabel);
+        this.ollamaBody.appendChild(sendImgRow);
+
         const urlRow = el("div", { display: "flex", gap: "6px" });
         this.urlInput = document.createElement("input");
         this.urlInput.type = "text";
@@ -714,6 +744,21 @@ class BerniniEditor {
         }
 
         /* ── finalize ────────────────────────────────────────────── */
+        // Capture section handles for the stacked/split layout toggle.
+        // Collapsible body panels must stay adjacent to their headers.
+        this._layoutSections = {
+            header: header,
+            left: [taskBox, sysBox, promptBox],
+            right: [slotHeader, this.slotBody, advHeader, this.advBody,
+                    ollamaHeader, this.ollamaBody],
+        };
+        this._layoutMode = "stacked";
+        try {
+            const saved = localStorage.getItem("berniniStudioLayout");
+            if (saved === "split") this._layoutMode = "split";
+        } catch (e) {}
+        this._applyLayout();
+
         this._updateTaskDisplay();
         this._updateNegPlaceholder();
         this._fetchModels(true);
@@ -861,21 +906,24 @@ class BerniniEditor {
         this._setEnhanceBusy(true, "Collecting images...");
         const fmt = this.apiFormatSelect ? this.apiFormatSelect.value : "Ollama";
 
-        // Collect source video frames + reference images
+        // Collect source video frames + reference images (vision models only)
+        const sendImages = this.sendImgCheck ? this.sendImgCheck.checked : true;
         let images = [];
         let sourceFrameCount = 0;
-        try {
-            const sourceFrames = await this._collectSourceVideoFrames();
-            sourceFrameCount = sourceFrames.length;
-            images = images.concat(sourceFrames);
-        } catch (e) {
-            console.warn("[BerniniStudio] Source frame extraction failed:", e);
-        }
-        try {
-            const refImages = await this._collectReferenceImages();
-            images = images.concat(refImages);
-        } catch (e) {
-            console.warn("[BerniniStudio] Reference image collection failed:", e);
+        if (sendImages) {
+            try {
+                const sourceFrames = await this._collectSourceVideoFrames();
+                sourceFrameCount = sourceFrames.length;
+                images = images.concat(sourceFrames);
+            } catch (e) {
+                console.warn("[BerniniStudio] Source frame extraction failed:", e);
+            }
+            try {
+                const refImages = await this._collectReferenceImages();
+                images = images.concat(refImages);
+            } catch (e) {
+                console.warn("[BerniniStudio] Reference image collection failed:", e);
+            }
         }
 
         const refCount = images.length - sourceFrameCount;
@@ -915,8 +963,13 @@ class BerniniEditor {
             if (data.response) {
                 this.promptArea.value = data.response;
                 if (this.promptWidget) this.promptWidget.value = data.response;
-                const visionNote = images.length > 0 ? " (with vision)" : " (text-only)";
-                this.statusEl.textContent = "Enhanced with " + this.taskSelect.value + " template" + visionNote;
+                if (data.vision_fallback) {
+                    this.statusEl.textContent = "Model is text-only -- enhanced without images (auto-fallback). Uncheck 'Send reference images' to skip the retry.";
+                    this.visionBadge.style.display = "none";
+                } else {
+                    const visionNote = data.vision_used ? " (with vision)" : " (text-only)";
+                    this.statusEl.textContent = "Enhanced with " + this.taskSelect.value + " template" + visionNote;
+                }
             } else {
                 this.statusEl.textContent = "Failed: " + (data.error || "Unknown error");
             }
@@ -980,6 +1033,54 @@ class BerniniEditor {
     /* ── reference image slot grid ──────────────────────────────── */
 
     /**
+     * Toggle between stacked (vertical) and split (two-column landscape)
+     * layouts. Split puts prompting on the left, slots/advanced/LLM on the
+     * right. Preference persists in localStorage across sessions.
+     */
+    _applyLayout() {
+        const s = this._layoutSections;
+        if (!s) return;
+
+        // Lazily create the two-column wrapper
+        if (!this._layoutWrap) {
+            this._layoutWrap = el("div", { display: "flex", gap: "10px", alignItems: "flex-start" });
+            this._layoutColL = el("div", {
+                display: "flex", flexDirection: "column", gap: "8px",
+                flex: "1 1 0", minWidth: "0",
+            });
+            this._layoutColR = el("div", {
+                display: "flex", flexDirection: "column", gap: "8px",
+                flex: "1 1 0", minWidth: "0",
+            });
+            this._layoutWrap.appendChild(this._layoutColL);
+            this._layoutWrap.appendChild(this._layoutColR);
+        }
+
+        if (this._layoutMode === "split") {
+            this.root.appendChild(s.header);
+            for (const sec of s.left) this._layoutColL.appendChild(sec);
+            for (const sec of s.right) this._layoutColR.appendChild(sec);
+            this.root.appendChild(this._layoutWrap);
+            this.layoutBtn.style.color = C.cyan;
+            this.layoutBtn.style.borderColor = "rgba(34,211,238,0.4)";
+        } else {
+            this.root.appendChild(s.header);
+            for (const sec of s.left) this.root.appendChild(sec);
+            for (const sec of s.right) this.root.appendChild(sec);
+            if (this._layoutWrap.parentElement) this._layoutWrap.remove();
+            this.layoutBtn.style.color = C.dim;
+            this.layoutBtn.style.borderColor = C.borderIn;
+        }
+
+        requestAnimationFrame(() => {
+            if (this.node.computeSize && this.node.size) {
+                this.node.size[1] = this.node.computeSize()[1];
+            }
+            if (this.node.graph) this.node.graph.setDirtyCanvas(true, true);
+        });
+    }
+
+    /**
      * Re-sync all DOM elements from their underlying widget values.
      * Called from onConfigure after ComfyUI restores saved widget values
      * (which happens AFTER onNodeCreated, so the editor DOM would
@@ -1006,6 +1107,9 @@ class BerniniEditor {
         }
         if (this.unloadOllamaWidget && this.unloadCheck) {
             this.unloadCheck.checked = !!this.unloadOllamaWidget.value;
+        }
+        if (this.sendRefImagesWidget && this.sendImgCheck) {
+            this.sendImgCheck.checked = this.sendRefImagesWidget.value !== false;
         }
         if (this.useDefNegWidget && this.defNegCheck) {
             this.defNegCheck.checked = this.useDefNegWidget.value !== false;

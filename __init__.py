@@ -1,3 +1,9 @@
-from .bernini_studio import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS, WEB_DIRECTORY
+"""ComfyUI-BerniniStudio -- single-node Bernini conditioning for ComfyUI."""
+
+from .bernini_studio import (
+    NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS,
+    WEB_DIRECTORY,
+)
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]

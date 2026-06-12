@@ -1,5 +1,5 @@
 """
-BerniniStudio v2.2
+BerniniStudio v2.3
 
 All-in-one ComfyUI conditioning node for Bernini (ByteDance).
 Wraps text encoding, VAE encoding of source video / reference images,
@@ -520,6 +520,10 @@ class BerniniStudio:
                                "Ollama uses /api/chat + /api/tags. "
                                "OpenAI / vLLM uses /v1/chat/completions + /v1/models. "
                                "Vision models will receive connected reference images automatically."}),
+                "send_ref_images": ("BOOLEAN", {"default": True,
+                    "tooltip": "Send connected reference images / source frames to the LLM during Enhance "
+                               "(vision models only). Disable for text-only models. If a text-only model "
+                               "rejects the images anyway, the request is automatically retried text-only."}),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -549,6 +553,7 @@ class BerniniStudio:
         augment_decay=0.0,
         augment_seed=0,
         api_format="Ollama",
+        send_ref_images=True,
         unique_id=None,
     ):
         # --- 0. Server-side auto-enhance (runs on every queue if enabled) ---
@@ -906,6 +911,7 @@ try:
             endpoint = f"{url}/v1/chat/completions"
 
         try:
+            vision_fallback = False
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     endpoint,
@@ -913,13 +919,46 @@ try:
                     headers=_llm_headers(api_format, include_json=True),
                     timeout=aiohttp.ClientTimeout(total=120),
                 ) as r:
+                    first_status = r.status
                     if r.status != 200:
-                        text = await r.text()
+                        err_text = await r.text()
+                    else:
+                        resp = await r.json()
+
+                if first_status != 200:
+                    # Non-vision model rejecting images? Strip them and retry once.
+                    lowered = err_text.lower()
+                    retryable = images_b64 and any(
+                        k in lowered for k in ("multimodal", "vision", "image")
+                    )
+                    if not retryable:
                         return web.json_response(
-                            {"error": f"LLM HTTP {r.status}: {text[:300]}"},
+                            {"error": f"LLM HTTP {first_status}: {err_text[:300]}"},
                             status=502,
                         )
-                    resp = await r.json()
+                    log.info("[BerniniStudio] Model rejected images; retrying text-only")
+                    if api_format == "Ollama":
+                        payload["messages"][1].pop("images", None)
+                    else:
+                        payload["messages"][1]["content"] = [
+                            c for c in payload["messages"][1]["content"]
+                            if c.get("type") == "text"
+                        ]
+                    images_b64 = []
+                    vision_fallback = True
+                    async with session.post(
+                        endpoint,
+                        json=payload,
+                        headers=_llm_headers(api_format, include_json=True),
+                        timeout=aiohttp.ClientTimeout(total=120),
+                    ) as r2:
+                        if r2.status != 200:
+                            text = await r2.text()
+                            return web.json_response(
+                                {"error": f"LLM HTTP {r2.status} (text-only retry): {text[:300]}"},
+                                status=502,
+                            )
+                        resp = await r2.json()
 
             # Extract text from response (handle both Ollama and OpenAI formats)
             if api_format == "Ollama":
@@ -944,6 +983,7 @@ try:
             return web.json_response({
                 "response": text,
                 "vision_used": has_vision,
+                "vision_fallback": vision_fallback,
                 "image_count": len(images_b64),
             })
         except Exception as e:
