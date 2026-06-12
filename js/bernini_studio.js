@@ -1132,19 +1132,28 @@ class BerniniEditor {
         // Slot grid: reload filenames from the restored widget and re-render
         this._slotFiles = this._readSlotWidget();
         this._renderSlots();
-        // Augment sliders (coerce NaN/undefined to 0, never the range midpoint)
+        // Augment sliders (coerce NaN/undefined/'' to 0 AND write back to the
+        // widget -- stale workflows can restore '' after construction, which
+        // fails ComfyUI's float validation before Python ever runs)
         if (this.augStrengthWidget && this.augStrengthRow) {
             const v = parseFloat(this.augStrengthWidget.value);
-            this.augStrengthRow._slider.value = isNaN(v) ? 0 : v;
-            this.augStrengthRow._valEl.textContent = String(this.augStrengthRow._slider.value);
+            const safe = isNaN(v) ? 0 : v;
+            this.augStrengthWidget.value = safe;
+            this.augStrengthRow._slider.value = safe;
+            this.augStrengthRow._valEl.textContent = String(safe);
         }
         if (this.augDecayWidget && this.augDecayRow) {
             const v = parseFloat(this.augDecayWidget.value);
-            this.augDecayRow._slider.value = isNaN(v) ? 0 : v;
-            this.augDecayRow._valEl.textContent = String(this.augDecayRow._slider.value);
+            const safe = isNaN(v) ? 0 : v;
+            this.augDecayWidget.value = safe;
+            this.augDecayRow._slider.value = safe;
+            this.augDecayRow._valEl.textContent = String(safe);
         }
         if (this.augSeedWidget && this.augSeedInput) {
-            this.augSeedInput.value = this.augSeedWidget.value || 0;
+            const v = parseInt(this.augSeedWidget.value, 10);
+            const safe = isNaN(v) ? 0 : v;
+            this.augSeedWidget.value = safe;
+            this.augSeedInput.value = safe;
         }
         // Refresh hint box / placeholders for the restored task
         this._updateTaskDisplay();
@@ -1595,6 +1604,20 @@ app.registerExtension({
         const onConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function (data) {
             const r = onConfigure ? onConfigure.apply(this, arguments) : undefined;
+            // Sanitize numeric widgets: workflows saved with older node
+            // versions restore positionally and can leave '' / undefined in
+            // FLOAT/INT widgets, which fails core prompt validation.
+            const numericDefaults = {
+                width: 832, height: 480, length: 81, batch_size: 1,
+                ref_max_size: 848,
+                augment_strength: 0, augment_decay: 0, augment_seed: 0,
+            };
+            for (const w of (this.widgets || [])) {
+                if (w.name in numericDefaults) {
+                    const v = parseFloat(w.value);
+                    if (isNaN(v)) w.value = numericDefaults[w.name];
+                }
+            }
             if (this._berniniEditor) {
                 requestAnimationFrame(() => {
                     this._berniniEditor._syncFromWidgets();
