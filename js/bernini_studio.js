@@ -863,7 +863,7 @@ class BerniniEditor {
 
     async _fetchModels(silent) {
         if (!silent) this.statusEl.textContent = "Fetching models...";
-        const fmt = this.apiFormatSelect ? this.apiFormatSelect.value : "ollama";
+        const fmt = this.apiFormatSelect ? this.apiFormatSelect.value : "Ollama";
         try {
             const resp = await api.fetchApi("/bernini_studio/models", {
                 method: "POST",
@@ -875,7 +875,7 @@ class BerniniEditor {
             });
             const data = await resp.json();
             if (!resp.ok) {
-                if (!silent) this.statusEl.textContent = (fmt === "openai" ? "vLLM" : "Ollama") + ": " + (data.error || resp.status);
+                if (!silent) this.statusEl.textContent = (fmt === "Ollama" ? "Ollama" : "vLLM") + ": " + (data.error || resp.status);
                 return;
             }
             const models = data.models || [];

@@ -20,11 +20,14 @@ support -- specifically comfy.conds.CONDList and the context_latents
 pathway in comfy/ldm/wan/model.py and comfy/model_base.py.
 """
 
+import asyncio
 import json
 import logging
 import os
 import re
 import torch
+import urllib.error
+import urllib.request
 
 import comfy.model_management as mm
 import comfy.utils
@@ -94,6 +97,48 @@ def _apply_openai_generation_options(payload, model, max_tokens=2048, temperatur
     else:
         payload["max_tokens"] = max_tokens
         payload["temperature"] = temperature
+
+
+
+
+def _apply_qwen_thinking_options(payload, model):
+    """Disable Qwen reasoning mode for llama.cpp OpenAI-compatible chat."""
+    if "qwen" in (model or "").lower():
+        payload.setdefault("chat_template_kwargs", {})["enable_thinking"] = False
+
+def _llm_json_request(method, endpoint, payload=None, headers=None, timeout=10):
+    """Fetch JSON from an LLM endpoint without inheriting proxy settings.
+
+    Running this through asyncio.to_thread keeps ComfyUI's aiohttp server loop
+    responsive and avoids the in-process aiohttp timeout seen with some LAN
+    llama.cpp endpoints.
+    """
+    data = None
+    request_headers = dict(headers or {})
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        request_headers.setdefault("Content-Type", "application/json")
+
+    req = urllib.request.Request(
+        endpoint,
+        data=data,
+        headers=request_headers,
+        method=method,
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            text = resp.read().decode("utf-8")
+            return resp.status, (json.loads(text) if text else {}), text
+    except urllib.error.HTTPError as e:
+        text = e.read().decode("utf-8", errors="replace")
+        parsed = None
+        try:
+            parsed = json.loads(text) if text else None
+        except Exception:
+            pass
+        return e.code, parsed, text
 
 
 # =========================================================================
@@ -730,6 +775,7 @@ class BerniniStudio:
                 "stream": False,
             }
             _apply_openai_generation_options(payload, model, max_tokens=2048, temperature=0.7)
+            _apply_qwen_thinking_options(payload, model)
             endpoint = f"{url}/v1/chat/completions"
 
         try:
@@ -794,41 +840,35 @@ try:
         api_format = data.get("api_format", "Ollama")
 
         try:
-            async with aiohttp.ClientSession() as session:
-                if api_format == "Ollama":
-                    # Ollama: GET /api/tags
-                    async with session.get(
-                        f"{url}/api/tags",
-                        timeout=aiohttp.ClientTimeout(total=10),
-                    ) as r:
-                        if r.status != 200:
-                            text = await r.text()
-                            return web.json_response(
-                                {"error": f"Ollama HTTP {r.status}: {text[:200]}"},
-                                status=502,
-                            )
-                        tags = await r.json()
-                    models = sorted(
-                        (m.get("name") or m.get("model") or "")
-                        for m in tags.get("models", []) if m
+            if api_format == "Ollama":
+                # Ollama: GET /api/tags
+                status, tags, text = await asyncio.to_thread(
+                    _llm_json_request, "GET", f"{url}/api/tags",
+                    None, {}, 10,
+                )
+                if status != 200:
+                    return web.json_response(
+                        {"error": f"Ollama HTTP {status}: {text[:200]}"},
+                        status=502,
                     )
-                else:
-                    # OpenAI-compatible: GET /v1/models
-                    async with session.get(
-                        f"{url}/v1/models",
-                        headers=_llm_headers(api_format, include_json=False),
-                        timeout=aiohttp.ClientTimeout(total=10),
-                    ) as r:
-                        if r.status != 200:
-                            text = await r.text()
-                            return web.json_response(
-                                {"error": f"OpenAI HTTP {r.status}: {text[:200]}"},
-                                status=502,
-                            )
-                        resp = await r.json()
-                    models = sorted(
-                        m.get("id", "") for m in resp.get("data", []) if m
+                models = sorted(
+                    (m.get("name") or m.get("model") or "")
+                    for m in (tags or {}).get("models", []) if m
+                )
+            else:
+                # OpenAI-compatible: GET /v1/models
+                status, resp, text = await asyncio.to_thread(
+                    _llm_json_request, "GET", f"{url}/v1/models",
+                    None, _llm_headers(api_format, include_json=False), 10,
+                )
+                if status != 200:
+                    return web.json_response(
+                        {"error": f"OpenAI HTTP {status}: {text[:200]}"},
+                        status=502,
                     )
+                models = sorted(
+                    m.get("id", "") for m in (resp or {}).get("data", []) if m
+                )
             return web.json_response({"models": [m for m in models if m]})
         except Exception as e:
             return web.json_response(
@@ -908,57 +948,46 @@ try:
                 "stream": False,
             }
             _apply_openai_generation_options(payload, model, max_tokens=2048, temperature=0.7)
+            _apply_qwen_thinking_options(payload, model)
             endpoint = f"{url}/v1/chat/completions"
 
         try:
             vision_fallback = False
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    endpoint,
-                    json=payload,
-                    headers=_llm_headers(api_format, include_json=True),
-                    timeout=aiohttp.ClientTimeout(total=120),
-                ) as r:
-                    first_status = r.status
-                    if r.status != 200:
-                        err_text = await r.text()
-                    else:
-                        resp = await r.json()
+            first_status, resp, err_text = await asyncio.to_thread(
+                _llm_json_request, "POST", endpoint, payload,
+                _llm_headers(api_format, include_json=True), 120,
+            )
 
-                if first_status != 200:
-                    # Non-vision model rejecting images? Strip them and retry once.
-                    lowered = err_text.lower()
-                    retryable = images_b64 and any(
-                        k in lowered for k in ("multimodal", "vision", "image")
+            if first_status != 200:
+                # Non-vision model rejecting images? Strip them and retry once.
+                lowered = (err_text or "").lower()
+                retryable = images_b64 and any(
+                    k in lowered for k in ("multimodal", "vision", "image")
+                )
+                if not retryable:
+                    return web.json_response(
+                        {"error": f"LLM HTTP {first_status}: {(err_text or '')[:300]}"},
+                        status=502,
                     )
-                    if not retryable:
-                        return web.json_response(
-                            {"error": f"LLM HTTP {first_status}: {err_text[:300]}"},
-                            status=502,
-                        )
-                    log.info("[BerniniStudio] Model rejected images; retrying text-only")
-                    if api_format == "Ollama":
-                        payload["messages"][1].pop("images", None)
-                    else:
-                        payload["messages"][1]["content"] = [
-                            c for c in payload["messages"][1]["content"]
-                            if c.get("type") == "text"
-                        ]
-                    images_b64 = []
-                    vision_fallback = True
-                    async with session.post(
-                        endpoint,
-                        json=payload,
-                        headers=_llm_headers(api_format, include_json=True),
-                        timeout=aiohttp.ClientTimeout(total=120),
-                    ) as r2:
-                        if r2.status != 200:
-                            text = await r2.text()
-                            return web.json_response(
-                                {"error": f"LLM HTTP {r2.status} (text-only retry): {text[:300]}"},
-                                status=502,
-                            )
-                        resp = await r2.json()
+                log.info("[BerniniStudio] Model rejected images; retrying text-only")
+                if api_format == "Ollama":
+                    payload["messages"][1].pop("images", None)
+                else:
+                    payload["messages"][1]["content"] = [
+                        c for c in payload["messages"][1]["content"]
+                        if c.get("type") == "text"
+                    ]
+                images_b64 = []
+                vision_fallback = True
+                second_status, resp, retry_text = await asyncio.to_thread(
+                    _llm_json_request, "POST", endpoint, payload,
+                    _llm_headers(api_format, include_json=True), 120,
+                )
+                if second_status != 200:
+                    return web.json_response(
+                        {"error": f"LLM HTTP {second_status} (text-only retry): {(retry_text or '')[:300]}"},
+                        status=502,
+                    )
 
             # Extract text from response (handle both Ollama and OpenAI formats)
             if api_format == "Ollama":
